@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Models (optional, but good practice to ignore large files if over 100MB)
+# models/*.pth
+
+# Data
+# data/input.txt (maybe keep for reproducibility if small)
