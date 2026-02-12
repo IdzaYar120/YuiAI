@@ -65,24 +65,45 @@ def load_local_model():
         print(f"Не вдалося завантажити модель: {e}")
         return None, None
 
-def generate_local_response(model, enc, user_text):
+def generate_local_response(model, enc, user_text, history=[]):
     if model is None:
         return "Мозок не підключено..."
 
     try:
-        # Формуємо промпт
-        prompt = f"User: {user_text}\nYui:"
-        input_ids = enc.encode(prompt) # ТЕПЕР ВИКОРИСТОВУЄМО BPE
+        # 1. Формуємо контекст (Останні 3 пари реплік, щоб не переповнити пам'ять)
+        context_str = ""
+        recent_history = history[-6:] # Беремо останні 6 повідомлень (3 User + 3 Yui)
+        
+        for msg in recent_history:
+            role = "User" if msg['role'] == "User" else "Yui"
+            context_str += f"{role}: {msg['content']}\n"
+
+        # 2. Додаємо поточне питання
+        prompt = f"{context_str}User: {user_text}\nYui:"
+        
+        # 3. Кодуємо
+        input_ids = enc.encode(prompt)
+        
+        # Обрізаємо, якщо занадто довго (Model Block Size = 256)
+        if len(input_ids) > 200: 
+            input_ids = input_ids[-200:]
+            
         input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(DEVICE)
         
-        # Генеруємо
+        # 4. Генеруємо
         output_ids = model.generate(input_tensor, max_new_tokens=MAX_NEW_TOKENS)
         
-        # Декодуємо
+        # 5. Декодуємо все
         full_text = enc.decode(output_ids[0].tolist())
         
-        # Очищуємо відповідь (беремо все, що після "Yui:")
-        response = full_text.split("Yui:")[-1].split("User:")[0].strip()
+        # 6. Витягуємо тільки НОВУ відповідь
+        # full_text буде типу: "User: Привіт\nYui: Здоров\nUser: Як справи?\nYui: Норм"
+        # Нам треба забрати останній "Yui: ..."
+        
+        response = full_text.split("Yui:")[-1].strip()
+        
+        # Чистка від сміття (якщо модель почала писати за User)
+        response = response.split("User:")[0].strip()
         
         return response if response else "Майстре, я задумалася..."
     except Exception as e:
@@ -99,7 +120,8 @@ def main():
     if local_model is None:
         return
 
-    temp_memory = []
+    # Історія діалогу
+    chat_history = []
 
     print("\nЮї в мережі! (Напиши '!exit' для виходу або '!help' для Gemini)")
     
@@ -118,18 +140,23 @@ def main():
         if user_input.startswith("!help"):
             query = user_input.replace("!help", "").strip()
             print("Звертаюся до Вчителя (Gemini 1.5)...")
-            response = ask_teacher(query if query else "Привіт", temp_memory)
+            response = ask_teacher(query if query else "Привіт", chat_history)
             prefix = "Yui (Teacher)"
         else:
-            response = generate_local_response(local_model, enc, user_input)
+            # Передаємо історію в локальну модель
+            response = generate_local_response(local_model, enc, user_input, chat_history)
             prefix = "Yui (Local)"
 
         print(f"\n{prefix}: {response}")
         
-        # Пам'ять на 10 реплік
-        temp_memory.append({"role": "User", "content": user_input})
-        temp_memory.append({"role": "Yui", "content": response})
-        if len(temp_memory) > 20: temp_memory = temp_memory[-20:]
+        # Зберігаємо в пам'ять
+        chat_history.append({"role": "User", "content": user_input})
+        chat_history.append({"role": "Yui", "content": response})
+        
+        # Тримаємо в пам'яті останні 20 повідомлень (для Gemini, бо вона розумніша)
+        # Локальна модель все одно візьме тільки останні 6 всередині функції
+        if len(chat_history) > 20: 
+            chat_history = chat_history[-20:]
 
 if __name__ == "__main__":
     main()
