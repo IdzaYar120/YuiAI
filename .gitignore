@@ -11,3 +11,4 @@ venv/
 
 # Data
 # data/input.txt (maybe keep for reproducibility if small)
+memory_db/
