@@ -101,12 +101,24 @@ class YuiGPT(nn.Module):
             loss = F.cross_entropy(logits, targets)
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
         for _ in range(max_new_tokens):
+            # обрізаємо контекст, якщо він занадто довгий
             idx_cond = idx[:, -BLOCK_SIZE:]
+            # отримуємо передбачення
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :]
+            # беремо тільки останній крок
+            logits = logits[:, -1, :] / temperature
+            
+            # опціонально кропаємо логіти (top-k)
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+
+            # перетворюємо в ймовірності
             probs = F.softmax(logits, dim=-1)
+            # обираємо наступний токен
             idx_next = torch.multinomial(probs, num_samples=1)
+            # додаємо до послідовності
             idx = torch.cat((idx, idx_next), dim=1)
         return idx

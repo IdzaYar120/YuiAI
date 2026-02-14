@@ -29,7 +29,32 @@ def get_working_model():
 
 teacher_model = get_working_model()
 
+# ================= КЕШУВАННЯ =================
+import json
+
+CACHE_FILE = "teacher_cache.json"
+
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+teacher_cache = load_cache()
+
 def ask_teacher(query, history_list):
+    # 1. Перевірка кешу
+    if query in teacher_cache:
+        print(f"⚡ (Знайдено в кеші) Економія API!")
+        return teacher_cache[query]
+
     try:
         formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history_list])
         prompt = f"""Ти Юї, персональна цифрова супутниця. 
@@ -42,7 +67,13 @@ def ask_teacher(query, history_list):
 Майстер: {query}
 Юї:"""
         response = teacher_model.generate_content(prompt)
-        return response.text.strip()
+        text_response = response.text.strip()
+        
+        # 2. Збереження в кеш
+        teacher_cache[query] = text_response
+        save_cache(teacher_cache)
+        
+        return text_response
     except Exception as e:
         return f"Вибач, Майстре, хмарні нейрони залагали. (T_T) Помилка: {e}"
 
