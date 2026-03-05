@@ -11,7 +11,7 @@ class MemorySystem:
         
         # Завантаження моделі для ембеддінгів (перетворення тексту в цифри)
         # 'all-MiniLM-L6-v2' - швидка і легка модель
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
         
         # Створення або завантаження колекції
         self.collection = self.client.get_or_create_collection(name="yui_memory")

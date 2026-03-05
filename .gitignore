@@ -7,7 +7,8 @@ venv/
 .env
 
 # Models (optional, but good practice to ignore large files if over 100MB)
-models/*.pth
+# Models (optional, but good practice to ignore large files if over 100MB)
+models/
 
 # Data
 # data/input.txt (maybe keep for reproducibility if small)

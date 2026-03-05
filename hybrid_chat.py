@@ -3,11 +3,11 @@ import os
 import tiktoken
 import google.generativeai as genai
 from src.model import YuiGPT
-from src.memory import MemorySystem # <--- Імпорт пам'яті
+# from src.memory import MemorySystem # <--- Імпорт пам'яті
 
 # ================= НАЛАШТУВАННЯ =================
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-MODEL_PATH = 'models/yui_v1.pth'
+DEVICE = 'cpu' # Примусово використовуємо CPU для стабільності
+MODEL_PATH = 'models/yui_best.pth'
 API_KEY = "AIzaSyC9sGkVnLKuiDarmb33dYYhkq9UlE8l9jI"
 
 # Параметри генерації
@@ -77,26 +77,27 @@ def ask_teacher(query, history_list):
     except Exception as e:
         return f"Вибач, Майстре, хмарні нейрони залагали. (T_T) Помилка: {e}"
 
-# ================= ЛОКАЛЬНА ГЕНЕРАЦІЯ =================
-def load_local_model():
-    print(f"Завантаження локальних мізків Юї на {DEVICE} (BPE Mode)...")
-    
-    # Ініціалізуємо токенізатор
-    enc = tiktoken.get_encoding("cl100k_base")
-    vocab_size = enc.n_vocab
+# ================= ЛОКАЛЬНА ГЕНЕРАЦІЯ (Bloom) =================
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-    # Завантажуємо модель
-    model = YuiGPT(vocab_size=vocab_size).to(DEVICE)
+MODEL_DIR = "models/yui_bloom" 
+BASE_MODEL = "bigscience/bloom-560m"
+
+def load_local_model():
+    path = MODEL_DIR if os.path.exists(MODEL_DIR) else BASE_MODEL
+    print(f"Завантаження мізків ({path})...")
+    
     try:
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-        model.load_state_dict(checkpoint)
-        model.eval()
-        return model, enc
+        tokenizer = AutoTokenizer.from_pretrained(path)
+        # Примусово float32 для стабільності на CPU
+        model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).to(DEVICE)
+        
+        return model, tokenizer
     except Exception as e:
-        print(f"Не вдалося завантажити модель: {e}")
+        print(f"Помилка завантаження моделі: {e}")
         return None, None
 
-def generate_local_response(model, enc, user_text, history=[], memory=None):
+def generate_local_response(model, tokenizer, user_text, history=[], memory=None):
     if model is None:
         return "Мозок не підключено..."
 
@@ -104,45 +105,50 @@ def generate_local_response(model, enc, user_text, history=[], memory=None):
         # 1. Пошук у довгостроковій пам'яті (RAG)
         memory_context = ""
         if memory:
-            relevant = memory.search(user_text, n_results=2)
+            relevant = memory.search(user_text, n_results=1) # Менше контексту для Bloom, щоб не плуталась
             if relevant:
                 memory_str = "\n".join([f"- {r}" for r in relevant])
-                memory_context = f"Спогади (Relevant Memories):\n{memory_str}\n\n"
+                memory_context = f"Context:\n{memory_str}\n\n"
 
-        # 2. Формуємо короткостроковий контекст (Останні 3 пари реплік)
-        recent_history_str = ""
-        recent_history = history[-6:] 
-        
-        for msg in recent_history:
+        # 2. Формуємо контекст
+        history_str = ""
+        for msg in history[-2:]: # Тільки останні 2 повідомлення (Bloom чутлива до довжини)
             role = "User" if msg['role'] == "User" else "Yui"
-            recent_history_str += f"{role}: {msg['content']}\n"
+            history_str += f"{role}: {msg['content']}\n"
 
-        # 3. Формуємо повний промпт
-        # [Спогади] + [Останні повідомлення] + [Нове питання]
-        prompt = f"{memory_context}{recent_history_str}User: {user_text}\nYui:"
+        # Bloom любить чисті промпти
+        prompt = f"{memory_context}{history_str}User: {user_text}\nYui:"
+        print(f"DEBUG PROMPT: {repr(prompt)}")
+
+        # 3. Кодуємо
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        print(f"DEBUG TOKENS: {inputs.input_ids}")
         
-        # 4. Кодуємо
-        input_ids = enc.encode(prompt)
+        # 4. Генеруємо
+        outputs = model.generate(
+            **inputs, 
+            max_new_tokens=80, 
+            do_sample=True,        # Вмикаємо креативність
+            temperature=0.6,
+            top_k=50,
+            top_p=0.9,
+            repetition_penalty=1.1,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
         
-        # Обрізаємо, якщо занадто довго (Model Block Size = 256)
-        if len(input_ids) > 240: 
-            input_ids = input_ids[-240:]
-            
-        input_tensor = torch.tensor(input_ids, dtype=torch.long).unsqueeze(0).to(DEVICE)
+        # 5. Декодуємо
+        full_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # 5. Генеруємо
-        output_ids = model.generate(input_tensor, max_new_tokens=MAX_NEW_TOKENS)
+        # Вирізаємо тільки нову відповідь
+        response = full_text.replace(prompt, "").strip()
+        response = response.split("User:")[0].split("\n")[0].strip()
         
-        # 6. Декодуємо
-        full_text = enc.decode(output_ids[0].tolist())
-        
-        # 7. Витягуємо відповідь
-        response = full_text.split("Yui:")[-1].strip()
-        response = response.split("User:")[0].strip()
-        
-        return response if response else "Майстре, я задумалася..."
+        if not response: return "..."
+        return response
+
     except Exception as e:
-        return f"Я ще вчуся будувати речення, Майстре! [{e}]"
+        return f"Помилка нейромережі: {e}"
 
 # ================= ГОЛОВНИЙ ЦИКЛ =================
 def main():
@@ -156,11 +162,12 @@ def main():
         return
 
     # Ініціалізація пам'яті
-    try:
-        memory = MemorySystem()
-    except Exception as e:
-        print(f"⚠️ Помилка пам'яті: {e}")
-        memory = None
+    # Ініціалізація пам'яті
+    # try:
+    #     memory = MemorySystem()
+    # except Exception as e:
+    #     print(f"⚠️ Помилка пам'яті: {e}")
+    memory = None
 
     chat_history = []
 
