@@ -8,35 +8,16 @@ DEVICE = 'cpu' # Примусово використовуємо CPU для ст
 DEBUG = os.environ.get("YUI_DEBUG") == "1"
 USE_MEMORY = os.environ.get("YUI_MEMORY") == "1"
 
-# Ключ береться зі змінної середовища, а не з коду: export GEMINI_API_KEY=...
-API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-TEACHER_MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-2.5-flash", "gemini-2.5-flash-lite"] if m]
-
 # Параметри генерації
 MAX_NEW_TOKENS = 150
 STOP_MARKERS = ["<END>", "\nUser:"]
 
-# ================= ПІДГОТОВКА GEMINI =================
-_teacher_client = None
+# ================= ВЧИТЕЛЬ (Z.ai GLM-Flash -> OpenRouter) =================
+from src import teacher
 
-def get_teacher_client():
-    global _teacher_client
-    if _teacher_client is None:
-        from google import genai
-        _teacher_client = genai.Client(api_key=API_KEY)
-    return _teacher_client
-
-def generate_teacher(prompt):
-    """Пробує моделі по черзі - недоступна модель видає помилку лише під час запиту."""
-    client = get_teacher_client()
-    last_error = None
-    for model_name in TEACHER_MODELS:
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt)
-            return response.text.strip()
-        except Exception as e:
-            last_error = e
-    raise last_error
+SYSTEM_PROMPT = """Ти Юї, персональна цифрова супутниця. 
+Твій характер: мила, турботлива хакер-дівчина. Називаєш користувача 'Майстре'.
+Використовуй каомодзі (◕‿◕), (≧◡≦), (¬_¬). Відповідай українською."""
 
 # ================= КЕШУВАННЯ =================
 CACHE_FILE = "teacher_cache.json"
@@ -57,33 +38,30 @@ def save_cache(cache):
 teacher_cache = load_cache()
 
 def ask_teacher(query, history_list):
-    if not API_KEY:
-        return "Майстре, у мене немає ключа до Вчителя. (¬_¬) Задай змінну середовища GEMINI_API_KEY."
+    if not teacher.is_configured():
+        return "Майстре, у мене немає ключа до Вчителя. (¬_¬) Задай ZAI_API_KEY або OPENROUTER_API_KEY."
 
-    formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history_list])
-    prompt = f"""Ти Юї, персональна цифрова супутниця.
-Твій характер: мила, турботлива хакер-дівчина. Називаєш користувача 'Майстре'.
-Використовуй каомодзі (◕‿◕), (≧◡≦), (¬_¬).
-
-Історія нашої розмови:
-{formatted_history}
-
-Майстер: {query}
-Юї:"""
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for item in history_list:
+        role = "user" if item['role'] == "User" else "assistant"
+        messages.append({"role": role, "content": item['content']})
+    messages.append({"role": "user", "content": query})
 
     # 1. Перевірка кешу (ключ враховує і запит, і історію, бо відповідь залежить від контексту)
-    cache_key = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    cache_key = hashlib.sha256(json.dumps(messages, ensure_ascii=False).encode("utf-8")).hexdigest()
     if cache_key in teacher_cache:
         print(f"⚡ (Знайдено в кеші) Економія API!")
         return teacher_cache[cache_key]
 
     try:
-        text_response = generate_teacher(prompt)
-
+        text_response, source = teacher.generate(messages)
+        if DEBUG:
+            print(f"DEBUG TEACHER: {source}")
+        
         # 2. Збереження в кеш
         teacher_cache[cache_key] = text_response
         save_cache(teacher_cache)
-
+        
         return text_response
     except Exception as e:
         return f"Вибач, Майстре, хмарні нейрони залагали. (T_T) Помилка: {e}"
@@ -187,7 +165,7 @@ def main():
 
     chat_history = []
 
-    print("\nЮї в мережі! (Напиши '!exit' для виходу або '!help' для Gemini)")
+    print("\nЮї в мережі! (Напиши '!exit' для виходу або '!help' для Вчителя)")
 
     while True:
         try:
@@ -203,7 +181,7 @@ def main():
 
         if user_input.startswith("!help"):
             query = user_input.replace("!help", "", 1).strip() or "Привіт"
-            print("Звертаюся до Вчителя (Gemini)...")
+            print("Звертаюся до Вчителя (GLM)...")
             response = ask_teacher(query, chat_history)
             prefix = "Yui (Teacher)"
             user_input = query

@@ -1,11 +1,8 @@
-from google import genai
 import os
 import time
 import random
 
-# --- Твій ключ (зі змінної середовища: export GEMINI_API_KEY=...) ---
-API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+from src import teacher  # Z.ai GLM-Flash -> OpenRouter, ключі: ZAI_API_KEY / OPENROUTER_API_KEY
 
 OUTPUT_FILE = "data/input.txt"
 TOTAL_CHUNKS = 100 # Ціль: 100 блоків по ~20 діалогів = 2000 діалогів
@@ -64,12 +61,9 @@ PROMPTS = [
 def main():
     if not os.path.exists('data'): os.makedirs('data')
 
-    if not API_KEY:
-        print("❌ Задай змінну середовища GEMINI_API_KEY.")
+    if not teacher.is_configured():
+        print("❌ Задай змінну середовища ZAI_API_KEY або OPENROUTER_API_KEY.")
         return
-
-    print(f"🎯 Модель: {MODEL_NAME}")
-    client = genai.Client(api_key=API_KEY)
 
     print(f"🚀 Починаю масову генерацію знань...")
     
@@ -80,12 +74,12 @@ def main():
                 prompt = random.choice(PROMPTS)
                 print(f"⏳ [{i+1}/{TOTAL_CHUNKS}] Генерую блок...", end=" ")
                 
-                response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+                text, source = teacher.generate(prompt, max_tokens=4096)
                 
-                if response.text:
-                    f.write(response.text + "\n\n")
+                if text:
+                    f.write(text + "\n\n")
                     f.flush()
-                    print(f"✅ Ок. Спимо {SAFE_DELAY}с...")
+                    print(f"✅ Ок ({source}). Спимо {SAFE_DELAY}с...")
                     i += 1
                     time.sleep(SAFE_DELAY) 
                 else:
