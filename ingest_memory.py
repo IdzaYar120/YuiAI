@@ -1,6 +1,7 @@
 import os
 try:
     from src.memory import MemorySystem
+    from src.data import load_dialogs
 except ImportError:
     print("❌ Бібліотеки ще не встановлені.")
     exit()
@@ -14,12 +15,8 @@ def ingest_data():
     mem = MemorySystem()
     
     print("📖 Читаємо data/input.txt...")
-    with open('data/input.txt', 'r', encoding='utf-8') as f:
-        text = f.read()
-
-    # Розбиваємо на діалоги (припускаємо, що вони розділені порожніми рядками або якось логічно)
-    # У нашому випадку це суцільний текст, тому поб'ємо на шматки по 200-300 символів
-    chunks = [text[i:i+300] for i in range(0, len(text), 250)]
+    # Кожен спогад - один цілий діалог, а не випадковий шматок тексту
+    chunks = load_dialogs('data/input.txt')
     
     print(f"📥 Завантажуємо {len(chunks)} спогадів у базу...")
     for i, chunk in enumerate(chunks):

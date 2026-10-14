@@ -7,9 +7,10 @@ venv/
 .env
 
 # Models (optional, but good practice to ignore large files if over 100MB)
-# Models (optional, but good practice to ignore large files if over 100MB)
 models/
 
 # Data
 # data/input.txt (maybe keep for reproducibility if small)
 memory_db/
+test_db/
+teacher_cache.json

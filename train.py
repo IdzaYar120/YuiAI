@@ -1,38 +1,45 @@
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, DataCollatorForLanguageModeling
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import Trainer, TrainingArguments
+
+from src.data import load_dialogs
 
 # Налаштування
 # bigscience/bloom-560m - мультимовна модель, яка знає багато мов
-MODEL_NAME = "bigscience/bloom-560m" 
+MODEL_NAME = "bigscience/bloom-560m"
 TRAIN_FILE = "data/input.txt"
 OUTPUT_DIR = "models/yui_bloom"
+MAX_LENGTH = 256
 
-import shutil
-import os
-
-if os.path.exists(OUTPUT_DIR):
-    shutil.rmtree(OUTPUT_DIR)
-
-class LocalTextDataset(Dataset):
-    def __init__(self, tokenizer, file_path, block_size):
-        with open(file_path, "r", encoding="utf-8") as f:
-            text = f.read()
-
-        # Tokenize (add eos token)
+class DialogDataset(Dataset):
+    """Кожен діалог - окремий приклад, що закінчується EOS, щоб модель вчилась зупинятися."""
+    def __init__(self, tokenizer, file_path, max_length):
         self.examples = []
-        tokenized_text = tokenizer.encode(text) + [tokenizer.eos_token_id]
-        
-        # Split into blocks of block_size
-        for i in range(0, len(tokenized_text) - block_size + 1, block_size):
-            self.examples.append(tokenized_text[i : i + block_size])
+        for dialog in load_dialogs(file_path):
+            ids = tokenizer.encode(dialog)[:max_length - 1] + [tokenizer.eos_token_id]
+            self.examples.append(ids)
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, i):
-        return torch.tensor(self.examples[i], dtype=torch.long)
+        return self.examples[i]
+
+class DialogCollator:
+    """Паддинг батчу. Лосс рахується по всіх реальних токенах (включно з EOS), але не по паддингу."""
+    def __init__(self, pad_token_id):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch):
+        max_len = max(len(ids) for ids in batch)
+        input_ids = torch.full((len(batch), max_len), self.pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((len(batch), max_len), dtype=torch.long)
+        for i, ids in enumerate(batch):
+            input_ids[i, :len(ids)] = torch.tensor(ids, dtype=torch.long)
+            attention_mask[i, :len(ids)] = 1
+        labels = input_ids.masked_fill(attention_mask == 0, -100)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 def main():
     print(f"🚀 Завантаження токенізатора та моделі {MODEL_NAME}...")
@@ -44,19 +51,14 @@ def main():
     # Bloom іноді не має pad_token встановленим
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        # model.config.pad_token_id = model.config.eos_token_id # Bloom це зазвичай має
 
     print("📚 Підготовка даних...")
-    # Використовуємо наш власний клас Dataset
-    train_dataset = LocalTextDataset(
+    train_dataset = DialogDataset(
         tokenizer=tokenizer,
         file_path=TRAIN_FILE,
-        block_size=128
+        max_length=MAX_LENGTH
     )
-    
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=False
-    )
+    print(f"   Діалогів: {len(train_dataset)}")
 
     print("⚙️ Налаштування тренування (Fine-tuning)...")
     training_args = TrainingArguments(
@@ -74,19 +76,21 @@ def main():
         warmup_steps=50,              # Плавний старт навчання
         report_to="none",
         fp16=False,                   # ВИМКНУТИ mixed precision на CPU
-        bf16=False                    # ВИМКНУТИ bf16
+        bf16=False,                   # ВИМКНУТИ bf16
+        remove_unused_columns=False   # Датасет віддає сирі списки токенів
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        data_collator=data_collator,
+        data_collator=DialogCollator(tokenizer.pad_token_id),
         train_dataset=train_dataset,
     )
 
     print("🏁 Починаємо навчання Brain 3.0!")
     trainer.train()
 
+    # Зберігаємо поверх старої моделі лише після успішного навчання
     print("💾 Збереження моделі...")
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

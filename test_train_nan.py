@@ -29,7 +29,7 @@ def test_backward():
         print("No NaN gradients found with standard loading in a single step.")
     
     print("\nTesting with torch.float32 and use_cache=False...")
-    model2 = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
+    model2 = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32)
     model2.config.use_cache = False
     
     outputs2 = model2(**inputs, labels=labels)

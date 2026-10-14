@@ -1,37 +1,44 @@
 import torch
 import os
-import tiktoken
-import google.generativeai as genai
-from src.model import YuiGPT
-# from src.memory import MemorySystem # <--- Імпорт пам'яті
+import json
+import hashlib
 
 # ================= НАЛАШТУВАННЯ =================
 DEVICE = 'cpu' # Примусово використовуємо CPU для стабільності
-MODEL_PATH = 'models/yui_best.pth'
-API_KEY = "AIzaSyC9sGkVnLKuiDarmb33dYYhkq9UlE8l9jI"
+DEBUG = os.environ.get("YUI_DEBUG") == "1"
+USE_MEMORY = os.environ.get("YUI_MEMORY") == "1"
+
+# Ключ береться зі змінної середовища, а не з коду: export GEMINI_API_KEY=...
+API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+TEACHER_MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-2.5-flash", "gemini-2.5-flash-lite"] if m]
 
 # Параметри генерації
-MAX_NEW_TOKENS = 150 
+MAX_NEW_TOKENS = 150
+STOP_MARKERS = ["<END>", "\nUser:"]
 
 # ================= ПІДГОТОВКА GEMINI =================
-CLEAN_API_KEY = API_KEY.replace('\n', '').strip()
-genai.configure(api_key=CLEAN_API_KEY)
+_teacher_client = None
 
-def get_working_model():
-    models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
-    for m_name in models:
+def get_teacher_client():
+    global _teacher_client
+    if _teacher_client is None:
+        from google import genai
+        _teacher_client = genai.Client(api_key=API_KEY)
+    return _teacher_client
+
+def generate_teacher(prompt):
+    """Пробує моделі по черзі - недоступна модель видає помилку лише під час запиту."""
+    client = get_teacher_client()
+    last_error = None
+    for model_name in TEACHER_MODELS:
         try:
-            m = genai.GenerativeModel(m_name)
-            return m
-        except:
-            continue
-    return genai.GenerativeModel('models/gemini-1.5-flash')
-
-teacher_model = get_working_model()
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            return response.text.strip()
+        except Exception as e:
+            last_error = e
+    raise last_error
 
 # ================= КЕШУВАННЯ =================
-import json
-
 CACHE_FILE = "teacher_cache.json"
 
 def load_cache():
@@ -39,7 +46,7 @@ def load_cache():
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except (OSError, json.JSONDecodeError):
             return {}
     return {}
 
@@ -50,14 +57,11 @@ def save_cache(cache):
 teacher_cache = load_cache()
 
 def ask_teacher(query, history_list):
-    # 1. Перевірка кешу
-    if query in teacher_cache:
-        print(f"⚡ (Знайдено в кеші) Економія API!")
-        return teacher_cache[query]
+    if not API_KEY:
+        return "Майстре, у мене немає ключа до Вчителя. (¬_¬) Задай змінну середовища GEMINI_API_KEY."
 
-    try:
-        formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history_list])
-        prompt = f"""Ти Юї, персональна цифрова супутниця. 
+    formatted_history = "\n".join([f"{item['role']}: {item['content']}" for item in history_list])
+    prompt = f"""Ти Юї, персональна цифрова супутниця.
 Твій характер: мила, турботлива хакер-дівчина. Називаєш користувача 'Майстре'.
 Використовуй каомодзі (◕‿◕), (≧◡≦), (¬_¬).
 
@@ -66,13 +70,20 @@ def ask_teacher(query, history_list):
 
 Майстер: {query}
 Юї:"""
-        response = teacher_model.generate_content(prompt)
-        text_response = response.text.strip()
-        
+
+    # 1. Перевірка кешу (ключ враховує і запит, і історію, бо відповідь залежить від контексту)
+    cache_key = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    if cache_key in teacher_cache:
+        print(f"⚡ (Знайдено в кеші) Економія API!")
+        return teacher_cache[cache_key]
+
+    try:
+        text_response = generate_teacher(prompt)
+
         # 2. Збереження в кеш
-        teacher_cache[query] = text_response
+        teacher_cache[cache_key] = text_response
         save_cache(teacher_cache)
-        
+
         return text_response
     except Exception as e:
         return f"Вибач, Майстре, хмарні нейрони залагали. (T_T) Помилка: {e}"
@@ -80,24 +91,33 @@ def ask_teacher(query, history_list):
 # ================= ЛОКАЛЬНА ГЕНЕРАЦІЯ (Bloom) =================
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_DIR = "models/yui_bloom" 
+MODEL_DIR = "models/yui_bloom"
 BASE_MODEL = "bigscience/bloom-560m"
 
 def load_local_model():
     path = MODEL_DIR if os.path.exists(MODEL_DIR) else BASE_MODEL
+    if path == BASE_MODEL:
+        print(f"⚠️ Навчену модель не знайдено в {MODEL_DIR} - використовую базову. Запусти 'python train.py'.")
     print(f"Завантаження мізків ({path})...")
-    
+
     try:
         tokenizer = AutoTokenizer.from_pretrained(path)
         # Примусово float32 для стабільності на CPU
         model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).to(DEVICE)
-        
+        model.eval()
+
         return model, tokenizer
     except Exception as e:
         print(f"Помилка завантаження моделі: {e}")
         return None, None
 
-def generate_local_response(model, tokenizer, user_text, history=[], memory=None):
+def extract_reply(generated):
+    """Обрізає згенерований текст на кінці репліки Юї, зберігаючи багаторядкові відповіді."""
+    for marker in STOP_MARKERS:
+        generated = generated.split(marker)[0]
+    return generated.strip()
+
+def generate_local_response(model, tokenizer, user_text, history=(), memory=None):
     if model is None:
         return "Мозок не підключено..."
 
@@ -118,32 +138,32 @@ def generate_local_response(model, tokenizer, user_text, history=[], memory=None
 
         # Bloom любить чисті промпти
         prompt = f"{memory_context}{history_str}User: {user_text}\nYui:"
-        print(f"DEBUG PROMPT: {repr(prompt)}")
+        if DEBUG:
+            print(f"DEBUG PROMPT: {repr(prompt)}")
 
         # 3. Кодуємо
         inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-        print(f"DEBUG TOKENS: {inputs.input_ids}")
-        
+        if DEBUG:
+            print(f"DEBUG TOKENS: {inputs.input_ids}")
+
         # 4. Генеруємо
-        outputs = model.generate(
-            **inputs, 
-            max_new_tokens=80, 
-            do_sample=True,        # Вмикаємо креативність
-            temperature=0.6,
-            top_k=50,
-            top_p=0.9,
-            repetition_penalty=1.1,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id
-        )
-        
-        # 5. Декодуємо
-        full_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Вирізаємо тільки нову відповідь
-        response = full_text.replace(prompt, "").strip()
-        response = response.split("User:")[0].split("\n")[0].strip()
-        
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=True,        # Вмикаємо креативність
+                temperature=0.6,
+                top_k=50,
+                top_p=0.9,
+                repetition_penalty=1.1,
+                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
+
+        # 5. Декодуємо лише нові токени (без промпту)
+        new_tokens = outputs[0][inputs.input_ids.shape[1]:]
+        response = extract_reply(tokenizer.decode(new_tokens, skip_special_tokens=True))
+
         if not response: return "..."
         return response
 
@@ -152,60 +172,56 @@ def generate_local_response(model, tokenizer, user_text, history=[], memory=None
 
 # ================= ГОЛОВНИЙ ЦИКЛ =================
 def main():
-    if not os.path.exists(MODEL_PATH):
-        print(f"Модель не знайдено за шляхом {MODEL_PATH}")
-        print("Запусти 'python train.py', щоб навчити модель!")
-        return
-
     local_model, enc = load_local_model()
     if local_model is None:
         return
 
-    # Ініціалізація пам'яті
-    # Ініціалізація пам'яті
-    # try:
-    #     memory = MemorySystem()
-    # except Exception as e:
-    #     print(f"⚠️ Помилка пам'яті: {e}")
+    # Ініціалізація пам'яті (вмикається через YUI_MEMORY=1)
     memory = None
+    if USE_MEMORY:
+        try:
+            from src.memory import MemorySystem
+            memory = MemorySystem()
+        except Exception as e:
+            print(f"⚠️ Помилка пам'яті: {e}")
 
     chat_history = []
 
     print("\nЮї в мережі! (Напиши '!exit' для виходу або '!help' для Gemini)")
-    
+
     while True:
         try:
             user_input = input("\nМайстер: ").strip()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             print("\nДо зустрічі, Майстре!")
             break
-        
+
         if not user_input: continue
-        if user_input.lower() in ['!exit', 'exit']: 
+        if user_input.lower() in ['!exit', 'exit']:
             print("До зустрічі, Майстре!")
             break
-        
+
         if user_input.startswith("!help"):
-            query = user_input.replace("!help", "").strip()
-            print("Звертаюся до Вчителя (Gemini 1.5)...")
-            response = ask_teacher(query if query else "Привіт", chat_history)
+            query = user_input.replace("!help", "", 1).strip() or "Привіт"
+            print("Звертаюся до Вчителя (Gemini)...")
+            response = ask_teacher(query, chat_history)
             prefix = "Yui (Teacher)"
+            user_input = query
         else:
             # Передаємо історію та пам'ять в локальну модель
             response = generate_local_response(local_model, enc, user_input, chat_history, memory)
             prefix = "Yui (Local)"
 
         print(f"\n{prefix}: {response}")
-        
+
         # Зберігаємо в оперативну пам'ять (історію)
         chat_history.append({"role": "User", "content": user_input})
         chat_history.append({"role": "Yui", "content": response})
         if len(chat_history) > 20: chat_history = chat_history[-20:]
 
-        # Зберігаємо в довгострокову пам'ять (RAG)
+        # Зберігаємо в довгострокову пам'ять (RAG) - репліку разом з відповіддю
         if memory:
-            memory.add(f"User: {user_input}")
-            memory.add(f"Yui: {response}")
+            memory.add(f"User: {user_input}\nYui: {response}", metadata={"source": "chat"})
 
 if __name__ == "__main__":
     main()

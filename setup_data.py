@@ -1,11 +1,11 @@
-import google.generativeai as genai
+from google import genai
 import os
 import time
 import random
 
-# --- Твій ключ ---
-RAW_KEY = "AIzaSyDqrK39VxIqzqe5abl1_nOte-nNIjZVrZQ" 
-API_KEY = RAW_KEY.replace('\n', '').replace('\r', '').replace(' ', '').strip()
+# --- Твій ключ (зі змінної середовища: export GEMINI_API_KEY=...) ---
+API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 OUTPUT_FILE = "data/input.txt"
 TOTAL_CHUNKS = 100 # Ціль: 100 блоків по ~20 діалогів = 2000 діалогів
@@ -13,17 +13,6 @@ TOTAL_CHUNKS = 100 # Ціль: 100 блоків по ~20 діалогів = 2000
 # --- ТАЙМІНГИ ---
 SAFE_DELAY = 10      
 COOLDOWN_DELAY = 60  
-
-def get_best_model():
-    print("🔍 Сканую доступні моделі...")
-    try:
-        genai.configure(api_key=API_KEY)
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                return m.name
-    except Exception as e:
-        print(f"⚠️ Помилка сканування: {e}")
-    return 'models/gemini-1.5-flash'
 
 PROMPTS = [
     # 1. Звичайний чат (Personality)
@@ -75,11 +64,12 @@ PROMPTS = [
 def main():
     if not os.path.exists('data'): os.makedirs('data')
 
-    model_name = get_best_model()
-    print(f"🎯 Модель: {model_name}")
-    
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel(model_name)
+    if not API_KEY:
+        print("❌ Задай змінну середовища GEMINI_API_KEY.")
+        return
+
+    print(f"🎯 Модель: {MODEL_NAME}")
+    client = genai.Client(api_key=API_KEY)
 
     print(f"🚀 Починаю масову генерацію знань...")
     
@@ -90,7 +80,7 @@ def main():
                 prompt = random.choice(PROMPTS)
                 print(f"⏳ [{i+1}/{TOTAL_CHUNKS}] Генерую блок...", end=" ")
                 
-                response = model.generate_content(prompt)
+                response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
                 
                 if response.text:
                     f.write(response.text + "\n\n")
