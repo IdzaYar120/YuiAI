@@ -14,3 +14,6 @@ models/
 memory_db/
 test_db/
 teacher_cache.json
+config/devices.toml
+firmware/esphome/secrets.yaml
+firmware/esphome/.esphome/

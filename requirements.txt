@@ -1,4 +1,7 @@
-# Чат (chat.py) і генерація даних (setup_data.py) потребують лише Ollama та стандартної бібліотеки Python
+# Чат (chat.py) і генерація даних (setup_data.py) потребують Ollama та Python 3.11+
+
+# Розумний будинок (MQTT)
+paho-mqtt>=2.0
 
 # Довгострокова пам'ять (YUI_MEMORY=1, ingest_memory.py)
 chromadb

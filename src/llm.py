@@ -55,19 +55,16 @@ def check():
         raise LLMError(f"Модель {MODEL} не завантажена. Виконай: ollama pull {MODEL}")
 
 
-def chat(messages, think=False, on_token=None, on_thinking=None, max_tokens=None):
-    """Генерує відповідь. on_token(text) викликається для кожного шматка відповіді (стрімінг),
-    on_thinking(text) - для шматків роздумів. Потрібна Ollama 0.9+ (параметр think).
-
-    think=True вмикає режим роздумів Qwen3: повільніше, але точніше для логіки, математики та коду.
-    Роздуми не повертаються - лише фінальна відповідь.
-    """
+def _chat_once(messages, think=False, tools=None, on_token=None, on_thinking=None, max_tokens=None):
+    """Один запит до моделі. Повертає (текст, виклики інструментів)."""
     options = dict(OPTIONS_THINK if think else OPTIONS_FAST, num_ctx=NUM_CTX)
     if max_tokens:
         options["num_predict"] = max_tokens
     payload = {"model": MODEL, "messages": messages, "stream": True, "think": think, "options": options}
+    if tools:
+        payload["tools"] = tools
 
-    parts = []
+    parts, tool_calls = [], []
     with _post("/api/chat", payload) as response:
         for line in response:
             if not line.strip():
@@ -78,6 +75,7 @@ def chat(messages, think=False, on_token=None, on_thinking=None, max_tokens=None
             message = chunk.get("message", {})
             if message.get("thinking") and on_thinking:
                 on_thinking(message["thinking"])
+            tool_calls += message.get("tool_calls") or []
             text = message.get("content", "")
             if text:
                 parts.append(text)
@@ -85,4 +83,44 @@ def chat(messages, think=False, on_token=None, on_thinking=None, max_tokens=None
                     on_token(text)
             if chunk.get("done"):
                 break
-    return "".join(parts).strip()
+    return "".join(parts).strip(), tool_calls
+
+
+def chat(messages, think=False, on_token=None, on_thinking=None, max_tokens=None):
+    """Генерує відповідь. on_token(text) викликається для кожного шматка відповіді (стрімінг),
+    on_thinking(text) - для шматків роздумів. Потрібна Ollama 0.9+ (параметр think).
+
+    think=True вмикає режим роздумів Qwen3: повільніше, але точніше для логіки, математики та коду.
+    Роздуми не повертаються - лише фінальна відповідь.
+    """
+    text, _ = _chat_once(messages, think, None, on_token, on_thinking, max_tokens)
+    return text
+
+
+def chat_with_tools(messages, tools, execute, think=False, on_token=None, on_thinking=None,
+                    on_tool=None, max_rounds=4):
+    """Як chat(), але модель може викликати інструменти.
+
+    execute(name, arguments) -> str виконує інструмент і повертає результат для моделі.
+    on_tool(name, arguments, result) - для логування. messages не змінюється.
+    """
+    messages = list(messages)
+    text = ""
+    for _ in range(max_rounds):
+        text, tool_calls = _chat_once(messages, think, tools, on_token, on_thinking)
+        if not tool_calls:
+            return text
+        messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+        for call in tool_calls:
+            function = call.get("function", {})
+            name, arguments = function.get("name", ""), function.get("arguments") or {}
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {}
+            result = execute(name, arguments)
+            if on_tool:
+                on_tool(name, arguments, result)
+            messages.append({"role": "tool", "tool_name": name, "content": result})
+    return text
