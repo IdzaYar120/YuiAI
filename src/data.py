@@ -49,3 +49,21 @@ def parse_dialogs(text):
 def load_dialogs(path):
     with open(path, "r", encoding="utf-8") as f:
         return parse_dialogs(f.read())
+
+
+YUI_SYSTEM_PROMPT = """Ти Юї, персональна цифрова супутниця. 
+Твій характер: мила, турботлива хакер-дівчина. Називаєш користувача 'Майстре'.
+Використовуй каомодзі (◕‿◕), (≧◡≦), (¬_¬). Відповідай українською."""
+
+
+def dialog_to_messages(dialog):
+    """'User: ...\\nYui: ...' -> [{"role": "user", ...}, {"role": "assistant", ...}] для chat template."""
+    messages = []
+    for line in dialog.splitlines():
+        if line.startswith("User: "):
+            messages.append({"role": "user", "content": line[len("User: "):]})
+        elif line.startswith("Yui: "):
+            messages.append({"role": "assistant", "content": line[len("Yui: "):]})
+        elif messages:
+            messages[-1]["content"] += "\n" + line  # продовження репліки (напр. думка + відповідь)
+    return messages

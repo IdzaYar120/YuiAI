@@ -9,15 +9,12 @@ DEBUG = os.environ.get("YUI_DEBUG") == "1"
 USE_MEMORY = os.environ.get("YUI_MEMORY") == "1"
 
 # Параметри генерації
-MAX_NEW_TOKENS = 150
+MAX_NEW_TOKENS = 256
 STOP_MARKERS = ["<END>", "\nUser:"]
 
 # ================= ВЧИТЕЛЬ (Z.ai GLM-Flash -> OpenRouter) =================
 from src import teacher
-
-SYSTEM_PROMPT = """Ти Юї, персональна цифрова супутниця. 
-Твій характер: мила, турботлива хакер-дівчина. Називаєш користувача 'Майстре'.
-Використовуй каомодзі (◕‿◕), (≧◡≦), (¬_¬). Відповідай українською."""
+from src.data import YUI_SYSTEM_PROMPT
 
 # ================= КЕШУВАННЯ =================
 CACHE_FILE = "teacher_cache.json"
@@ -41,7 +38,7 @@ def ask_teacher(query, history_list):
     if not teacher.is_configured():
         return "Майстре, у мене немає ключа до Вчителя. (¬_¬) Задай ZAI_API_KEY або OPENROUTER_API_KEY."
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": YUI_SYSTEM_PROMPT}]
     for item in history_list:
         role = "user" if item['role'] == "User" else "assistant"
         messages.append({"role": role, "content": item['content']})
@@ -66,24 +63,30 @@ def ask_teacher(query, history_list):
     except Exception as e:
         return f"Вибач, Майстре, хмарні нейрони залагали. (T_T) Помилка: {e}"
 
-# ================= ЛОКАЛЬНА ГЕНЕРАЦІЯ (Bloom) =================
+# ================= ЛОКАЛЬНА ГЕНЕРАЦІЯ (Qwen3 + LoRA) =================
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-MODEL_DIR = "models/yui_bloom"
-BASE_MODEL = "bigscience/bloom-560m"
+ADAPTER_DIR = "models/yui_qwen_lora"
+BASE_MODEL = "Qwen/Qwen3-1.7B"
+HISTORY_MESSAGES = 6  # Скільки останніх повідомлень передавати моделі
 
 def load_local_model():
-    path = MODEL_DIR if os.path.exists(MODEL_DIR) else BASE_MODEL
-    if path == BASE_MODEL:
-        print(f"⚠️ Навчену модель не знайдено в {MODEL_DIR} - використовую базову. Запусти 'python train.py'.")
-    print(f"Завантаження мізків ({path})...")
+    print(f"Завантаження мізків ({BASE_MODEL})...")
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(path)
+        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
         # Примусово float32 для стабільності на CPU
-        model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.float32).to(DEVICE)
-        model.eval()
+        model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, dtype=torch.float32).to(DEVICE)
 
+        if os.path.exists(ADAPTER_DIR):
+            from peft import PeftModel
+            print(f"Підключаю LoRA-адаптери Юї ({ADAPTER_DIR})...")
+            # Вливаємо адаптери у ваги - генерація швидша, ніж з окремим LoRA-шаром
+            model = PeftModel.from_pretrained(model, ADAPTER_DIR).merge_and_unload()
+        else:
+            print(f"⚠️ Адаптери не знайдено в {ADAPTER_DIR} - Юї без донавчання. Запусти 'python train.py'.")
+
+        model.eval()
         return model, tokenizer
     except Exception as e:
         print(f"Помилка завантаження моделі: {e}")
@@ -91,9 +94,21 @@ def load_local_model():
 
 def extract_reply(generated):
     """Обрізає згенерований текст на кінці репліки Юї, зберігаючи багаторядкові відповіді."""
+    generated = generated.replace("<think>", "").replace("</think>", "")
     for marker in STOP_MARKERS:
         generated = generated.split(marker)[0]
     return generated.strip()
+
+def build_messages(user_text, history=(), memory_context=""):
+    system = YUI_SYSTEM_PROMPT
+    if memory_context:
+        system += f"\n\nЩо ти пам'ятаєш з минулих розмов:\n{memory_context}"
+    messages = [{"role": "system", "content": system}]
+    for msg in history[-HISTORY_MESSAGES:]:
+        role = "user" if msg['role'] == "User" else "assistant"
+        messages.append({"role": role, "content": msg['content']})
+    messages.append({"role": "user", "content": user_text})
+    return messages
 
 def generate_local_response(model, tokenizer, user_text, history=(), memory=None):
     if model is None:
@@ -103,39 +118,37 @@ def generate_local_response(model, tokenizer, user_text, history=(), memory=None
         # 1. Пошук у довгостроковій пам'яті (RAG)
         memory_context = ""
         if memory:
-            relevant = memory.search(user_text, n_results=1) # Менше контексту для Bloom, щоб не плуталась
+            relevant = memory.search(user_text, n_results=2)
             if relevant:
-                memory_str = "\n".join([f"- {r}" for r in relevant])
-                memory_context = f"Context:\n{memory_str}\n\n"
+                memory_context = "\n".join([f"- {r}" for r in relevant])
 
-        # 2. Формуємо контекст
-        history_str = ""
-        for msg in history[-2:]: # Тільки останні 2 повідомлення (Bloom чутлива до довжини)
-            role = "User" if msg['role'] == "User" else "Yui"
-            history_str += f"{role}: {msg['content']}\n"
-
-        # Bloom любить чисті промпти
-        prompt = f"{memory_context}{history_str}User: {user_text}\nYui:"
+        # 2. Формуємо чат-промпт (режим роздумів Qwen3 вимкнено, як і під час навчання)
+        prompt = tokenizer.apply_chat_template(
+            build_messages(user_text, history, memory_context),
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
         if DEBUG:
             print(f"DEBUG PROMPT: {repr(prompt)}")
 
         # 3. Кодуємо
-        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-        if DEBUG:
-            print(f"DEBUG TOKENS: {inputs.input_ids}")
+        inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).to(DEVICE)
 
-        # 4. Генеруємо
+        # 4. Генеруємо (рекомендовані Qwen параметри для режиму без роздумів)
+        eos_ids = [i for i in (tokenizer.convert_tokens_to_ids("<|im_end|>"), tokenizer.eos_token_id)
+                   if isinstance(i, int) and i != tokenizer.unk_token_id]
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
                 do_sample=True,        # Вмикаємо креативність
-                temperature=0.6,
-                top_k=50,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                temperature=0.7,
+                top_k=20,
+                top_p=0.8,
+                repetition_penalty=1.05,
+                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos_ids[0],
+                eos_token_id=eos_ids
             )
 
         # 5. Декодуємо лише нові токени (без промпту)
