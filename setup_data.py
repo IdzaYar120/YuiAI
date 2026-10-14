@@ -2,14 +2,16 @@ import os
 import time
 import random
 
-from src import teacher  # Z.ai GLM-Flash -> OpenRouter, ключі: ZAI_API_KEY / OPENROUTER_API_KEY
+from src import llm  # Локальна модель через Ollama (YUI_MODEL, за замовчуванням qwen3:8b)
 
 OUTPUT_FILE = "data/input.txt"
 TOTAL_CHUNKS = 100 # Ціль: 100 блоків по ~20 діалогів = 2000 діалогів
 
-# --- ТАЙМІНГИ ---
-SAFE_DELAY = 10      
-COOLDOWN_DELAY = 60  
+# Спільне правило для всіх промптів: без вигаданих дій, яких Юї не може виконати
+RULES = """
+ПРАВИЛА: Юї - чат-асистентка без доступу до комп'ютера, файлів та інтернету.
+Вона НІКОЛИ не каже, що щось перевірила, завантажила чи зробила - лише радить і пояснює.
+Відповіді мають бути фактично правильними. Без markdown-заголовків і нумерації діалогів."""
 
 PROMPTS = [
     # 1. Звичайний чат (Personality)
@@ -61,9 +63,12 @@ PROMPTS = [
 def main():
     if not os.path.exists('data'): os.makedirs('data')
 
-    if not teacher.is_configured():
-        print("❌ Задай змінну середовища ZAI_API_KEY або OPENROUTER_API_KEY.")
+    try:
+        llm.check()
+    except llm.LLMError as e:
+        print(f"❌ {e}")
         return
+    print(f"🎯 Модель: {llm.MODEL}")
 
     print(f"🚀 Починаю масову генерацію знань...")
     
@@ -74,24 +79,19 @@ def main():
                 prompt = random.choice(PROMPTS)
                 print(f"⏳ [{i+1}/{TOTAL_CHUNKS}] Генерую блок...", end=" ")
                 
-                text, source = teacher.generate(prompt, max_tokens=4096)
+                text = llm.chat([{"role": "user", "content": prompt + RULES}], max_tokens=4096)
                 
                 if text:
                     f.write(text + "\n\n")
                     f.flush()
-                    print(f"✅ Ок ({source}). Спимо {SAFE_DELAY}с...")
+                    print("✅ Ок.")
                     i += 1
-                    time.sleep(SAFE_DELAY) 
                 else:
                     print("⚠️ Пуста відповідь.")
             
-            except Exception as e:
-                if "429" in str(e):
-                    print(f"\n🛑 ЛІМІТ! Спимо {COOLDOWN_DELAY}с...")
-                    time.sleep(COOLDOWN_DELAY)
-                else:
-                    print(f"\n❌ Помилка: {e}")
-                    time.sleep(5)
+            except llm.LLMError as e:
+                print(f"\n❌ Помилка: {e}")
+                time.sleep(5)
 
     print(f"\n🎉 Генерацію завершено! Перевір {OUTPUT_FILE}")
 

@@ -1,7 +1,11 @@
+# Чат (chat.py) і генерація даних (setup_data.py) потребують лише Ollama та стандартної бібліотеки Python
+
+# Довгострокова пам'ять (YUI_MEMORY=1, ingest_memory.py)
+chromadb
+sentence-transformers
+
+# Необов'язкове донавчання стилю LoRA (train.py)
 torch
 transformers>=4.56
 accelerate>=1.1.0
 peft>=0.13
-openai>=1.0
-chromadb
-sentence-transformers
