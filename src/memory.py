@@ -3,6 +3,9 @@ from sentence_transformers import SentenceTransformer
 import os
 import uuid
 
+EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+COLLECTION_NAME = "yui_memory_v2"
+
 class MemorySystem:
     def __init__(self, db_path="memory_db"):
         print("🧠 Ініціалізація довгострокової пам'яті (RAG)...")
@@ -10,11 +13,11 @@ class MemorySystem:
         self.client = chromadb.PersistentClient(path=db_path)
         
         # Завантаження моделі для ембеддінгів (перетворення тексту в цифри)
-        # 'all-MiniLM-L6-v2' - швидка і легка модель
-        self.embedder = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+        # Мультимовна модель: англомовна 'all-MiniLM-L6-v2' погано розуміє українську
+        self.embedder = SentenceTransformer(EMBEDDING_MODEL, device='cpu')
         
-        # Створення або завантаження колекції
-        self.collection = self.client.get_or_create_collection(name="yui_memory")
+        # Створення або завантаження колекції (нова назва, бо вектори старої моделі несумісні)
+        self.collection = self.client.get_or_create_collection(name=COLLECTION_NAME)
         print(f"📚 Пам'ять завантажено. Кількість спогадів: {self.collection.count()}")
 
     def add(self, text, metadata=None):
@@ -41,7 +44,7 @@ class MemorySystem:
         
         results = self.collection.query(
             query_embeddings=[vector],
-            n_results=n_results
+            n_results=min(n_results, self.collection.count())
         )
         
         # results['documents'] це список списків, тому беремо [0]

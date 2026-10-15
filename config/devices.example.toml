@@ -1,0 +1,41 @@
+# Скопіюй у config/devices.toml і заповни під свою квартиру:
+#   cp config/devices.example.toml config/devices.toml
+
+[mqtt]
+host = "localhost"        # Mosquitto на сервері Юї
+port = 1883
+username = "yui"
+password = "зміни-мене"
+
+# ---------- Розумна розетка Shelly Gen2/Gen3 (MQTT вбудований) ----------
+# У веб-інтерфейсі Shelly: Settings -> MQTT -> увімкнути, вказати сервер,
+# увімкнути "RPC status notifications" і "Generic status update over MQTT".
+# Там само (Switch -> Auto off) варто задати автовимкнення - це працює навіть без сервера.
+[[device]]
+id = "kettle"
+name = "Чайник"
+room = "Кухня"
+aliases = ["електрочайник", "закип'ятити воду"]
+driver = "shelly"
+topic_prefix = "shellyplugsg3-a0b1c2"   # MQTT prefix з налаштувань Shelly
+auto_off_minutes = 5                   # Страховка на сервері
+
+# ---------- Реле на ESP32 з прошивкою ESPHome (firmware/esphome/relay.yaml) ----------
+[[device]]
+id = "kitchen_light"
+name = "Світло на кухні"
+room = "Кухня"
+driver = "mqtt"
+command_topic = "yui/kitchen_light/set"
+state_topic = "yui/kitchen_light/state"
+payload_on = "ON"
+payload_off = "OFF"
+
+[[device]]
+id = "bedroom_light"
+name = "Світло в спальні"
+room = "Спальня"
+aliases = ["люстра"]
+driver = "mqtt"
+command_topic = "yui/bedroom_light/set"
+state_topic = "yui/bedroom_light/state"

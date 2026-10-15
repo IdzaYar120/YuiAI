@@ -1,29 +1,17 @@
-import google.generativeai as genai
 import os
 import time
 import random
 
-# --- Твій ключ ---
-RAW_KEY = "AIzaSyDqrK39VxIqzqe5abl1_nOte-nNIjZVrZQ" 
-API_KEY = RAW_KEY.replace('\n', '').replace('\r', '').replace(' ', '').strip()
+from src import llm  # Локальна модель через Ollama (YUI_MODEL, за замовчуванням qwen3:8b)
 
 OUTPUT_FILE = "data/input.txt"
 TOTAL_CHUNKS = 100 # Ціль: 100 блоків по ~20 діалогів = 2000 діалогів
 
-# --- ТАЙМІНГИ ---
-SAFE_DELAY = 10      
-COOLDOWN_DELAY = 60  
-
-def get_best_model():
-    print("🔍 Сканую доступні моделі...")
-    try:
-        genai.configure(api_key=API_KEY)
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                return m.name
-    except Exception as e:
-        print(f"⚠️ Помилка сканування: {e}")
-    return 'models/gemini-1.5-flash'
+# Спільне правило для всіх промптів: без вигаданих дій, яких Юї не може виконати
+RULES = """
+ПРАВИЛА: Юї - чат-асистентка без доступу до комп'ютера, файлів та інтернету.
+Вона НІКОЛИ не каже, що щось перевірила, завантажила чи зробила - лише радить і пояснює.
+Відповіді мають бути фактично правильними. Без markdown-заголовків і нумерації діалогів."""
 
 PROMPTS = [
     # 1. Звичайний чат (Personality)
@@ -75,11 +63,12 @@ PROMPTS = [
 def main():
     if not os.path.exists('data'): os.makedirs('data')
 
-    model_name = get_best_model()
-    print(f"🎯 Модель: {model_name}")
-    
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel(model_name)
+    try:
+        llm.check()
+    except llm.LLMError as e:
+        print(f"❌ {e}")
+        return
+    print(f"🎯 Модель: {llm.MODEL}")
 
     print(f"🚀 Починаю масову генерацію знань...")
     
@@ -90,24 +79,19 @@ def main():
                 prompt = random.choice(PROMPTS)
                 print(f"⏳ [{i+1}/{TOTAL_CHUNKS}] Генерую блок...", end=" ")
                 
-                response = model.generate_content(prompt)
+                text = llm.chat([{"role": "user", "content": prompt + RULES}], max_tokens=4096)
                 
-                if response.text:
-                    f.write(response.text + "\n\n")
+                if text:
+                    f.write(text + "\n\n")
                     f.flush()
-                    print(f"✅ Ок. Спимо {SAFE_DELAY}с...")
+                    print("✅ Ок.")
                     i += 1
-                    time.sleep(SAFE_DELAY) 
                 else:
                     print("⚠️ Пуста відповідь.")
             
-            except Exception as e:
-                if "429" in str(e):
-                    print(f"\n🛑 ЛІМІТ! Спимо {COOLDOWN_DELAY}с...")
-                    time.sleep(COOLDOWN_DELAY)
-                else:
-                    print(f"\n❌ Помилка: {e}")
-                    time.sleep(5)
+            except llm.LLMError as e:
+                print(f"\n❌ Помилка: {e}")
+                time.sleep(5)
 
     print(f"\n🎉 Генерацію завершено! Перевір {OUTPUT_FILE}")
 
